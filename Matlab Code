@@ -1,6 +1,4 @@
 function [C,V_post]= PDEGasStorage(NP,NI,NT,T_max,term)
-% Credits Angela Nardo, University of Padova, 2013
-% Adjustments and errors on GB
 
 % Discretizations:
 % - for NI: capacity / ingjection generally works -> for example 30 steps
