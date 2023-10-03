@@ -1,0 +1,214 @@
+function [C,V_post]= PDEGasStorage(NP,NI,NT,T_max,term)
+% Credits Angela Nardo, University of Padova, 2013
+% Adjustments and errors on GB
+
+% Discretizations:
+% - for NI: capacity / ingjection generally works -> for example 30 steps
+% (comparative study) or 40 steps (Vargiolu)
+% - for prices: get to DeltaS = 1
+% - delta time: technical condition applies on the delta time step, if
+% violated the numerical approximation becomes instable. We set a grid of
+% 4000 (8000) following https://web.archive.org/web/20180723005051id_/http://spiral.imperial.ac.uk/bitstream/10044/1/38631/2/SSRN-id2606423.pdf
+% See also Appendix 1 in (Bastian 2012), https://www.econstor.eu/bitstream/10419/103284/1/wp1201.pdf
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Parameters
+k= 1.9482; % mean reversion gas price
+lambda=0; % no jumps
+theta_tilde=4.6425; % theta_bar=theta−sigma_quad/2k
+sigma_quad=1.4368^2; % vol
+theta=theta_tilde+sigma_quad/(2*k); % long run mean
+
+mu_phi=0; % no jump
+sigma_phi_quad=0.035; % no jump
+nu=exp(mu_phi + sigma_phi_quad/2)-1; % no jump
+theta_bar=theta_tilde-lambda*nu; % no jump
+
+r=0.1; % risk free rate
+P_max=220;% maximum gas price for analysit, 12 MMbutf - Bianchi's prices are in MWh
+P_min=0.01; % minimum gas price
+I_max=100000; % maximum capacity over I_b = CAPACITY BIANCHI
+%I_max = 2500;
+dT=T_max/(NT-1); % time step for grid
+dP= P_max/(NP-1); % price step for grid
+dI=I_max/(NI-1); % capacity step for grid
+% Build the nodes in the 3d grid
+P=linspace(P_min,P_max,NP);
+I=linspace(0,I_max,NI);
+mu=zeros(NP,1);
+dia=zeros(NP,1);
+subdia=zeros(NP,1);
+sopradia=zeros(NP,1);
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+% calcolo delle costanti K, K1 e K2
+I_b=500; % minimum capacity to keep - NOT RELEVANT FOR THE PROBLEM can be set to 0
+%K=250/(sqrt(I_max)); % problem 0: K=I_max; problem 1: K = constraint from Andrea
+%K2=-1/(I_b+I_max);
+%K1=-80/(sqrt(1/I_b+K2)); % problem 0: K=I_max; problem 1: K = constraint from Andrea
+%%%%%%%%%%%%%%%%%%%%%%%%%%%
+K=5000/(sqrt(I_max)); % problem 0: K=I_max; problem 1: K = constraint from Andrea
+K2=0;
+K1=-2500/(sqrt(1/(I_b+I_max))); 
+
+
+NP_int = NP-2; % number of internal points along P
+suddivisioni_integr=100; %number of subdivisions for application of trapezium rule
+
+% build mu and diagonals of matrix A
+for i=1:NP
+mu(i)=P(i)*k*(theta-lambda*nu-log(P(i)));
+dia(i)=-(sigma_quad*P(i)^2)/(dP^2) -r;
+subdia(i)= -mu(i)/(2*dP)+(sigma_quad*P(i)^2)/(2*dP^2);
+sopradia(i)= (sigma_quad*P(i)^2)/(2*dP^2) + mu(i)/(2*dP);
+end
+% create matrix A
+A = zeros(NP_int,NP_int);
+A(1,1)=dia(2);
+A(1,2)= sopradia(2);
+A(NP_int,NP_int-1)=subdia(NP-1);
+A(NP_int,NP_int)=dia(NP);
+for i=2:NP_int-1
+A(i,i-1)=subdia(i+1);
+A(i,i)=dia(i+1);
+A(i,i+1)=sopradia(i+1);
+end
+A=eye(NP_int,NP_int)-dT.*A;
+% Initialize
+V_I = zeros(NI,NP); % derivative in I at time n
+V_pre = zeros(NI,NP); % matrix of V at time n-1
+V_post = zeros(NI,NP); % matrix of V at time n
+G= zeros(NP_int,1); % matrix non-linear term
+C= zeros(NI,NP);
+CC= zeros(NI,NP_int); % boundary conditions
+b= zeros(NP_int,1);
+x= zeros(NI,1); % auxiliary
+integraleV=zeros(NT,1);
+% terminal condition if applicaple - not relevant for base problem
+if term==1
+    for i=1:NI
+        for j=1:NP
+            V_pre(i,j)=-2*P(j)*max(100000-I(i),0);
+        end
+    end
+end
+% compute boundary conditions
+T = linspace(1,T_max, NT); %added fixed at 0
+
+for n=NT-1:-1:1
+    t=T(n);
+    for i=1:NI
+        %I_temp=I(i);
+        V_temp=zeros(suddivisioni_integr,1);
+        tempo=linspace(t,T(NT),suddivisioni_integr);
+        DeltaT=(T(NT)-t)/(suddivisioni_integr-1);
+        % compute integral between t and T for V(Pmax, I, t) using
+        % trapezium rule
+        for m=1:suddivisioni_integr
+            s=tempo(m);
+            sigma_s=(1-exp(-2*k*(s-t)))/(2*k); %variance
+            I_temp=(sqrt(I(i))-K*(s-t)/2)^2;
+            %solution for I
+            V_temp(m)=(K*sqrt(I_temp)*exp(r*s+exp(-k*(s-t))*...
+                (log(P(NP))-theta_bar)+(sigma_quad*sigma_s)/2));
+        end
+        integraleV(n)=trapz(tempo,V_temp);
+        V_post(i,NP)=exp(r*t+theta_bar)*integraleV(n);
+        %%%%%%%%%%%%%%%%%%%%%%%%%
+        % compute integral between t and T for V(Pmin, I, t)
+        I_temp=I(i);
+        for m=1:suddivisioni_integr
+            s=tempo(m);
+            sigma_s=(1-exp(-2*k*(s-t)))/(2*k);
+            if m==1
+                V_temp(m)=exp(r*t+theta_bar)*(K1*sqrt(1/(I_b+I_temp)+K2)*...
+                    exp(-r*s+exp(-k*(s-t))*(log(P(1))-theta_bar)+...
+                    (sigma_quad*sigma_s)/2));
+            else
+                I_temp=I_temp-DeltaT*(K1*sqrt(1/(I_temp+I_b)+K2));
+                %approximate equation
+                I_mom=min(I_temp,2000);
+                V_temp(m)=(K1*sqrt(1/(I_b+I_mom)+K2)*exp(-r*s+exp(-k*(s-t))*...
+                    (log(P(1))-theta_bar)+(sigma_quad*sigma_s)/2));
+                I_temp=I_mom;
+            end
+    end
+    integraleV(n)=trapz(tempo,V_temp);
+    V_post(i,1)=exp(r*t+theta_bar)*integraleV(n);
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    C(i,1)=CIN(I(i));
+    C(i,NP)=COUT(I(i));
+    %if i <= 1936
+    %C(i,1)=-2500;
+    %C(i,NP)=5000;
+    %else
+    %C(i,1)=-8000;
+    %C(i,NP)=10000;
+    
+    %C(i,1)=-2500;
+    %C(i,NP)=5000;
+    
+    CC(i,1)=dT*subdia(2)*V_post(i,1);
+    CC(i,NP_int)=dT*sopradia(NP-1)*V_post(i,NP);
+end
+% Compute derivative in I and contribution of non-linear term
+
+for i=2:NI
+for j=1:NP
+V_I(i,j)=(1/dI)*(V_pre(i,j)-V_pre(i-1,j));
+end
+end
+for i=1:NI
+for j=1:NP_int
+    
+    C(i,j+1)=strategia(P(j+1),I(i),V_I(i,j+1),K,K1,K2,I_b); % as original
+    G(j)=dT*(-(C(i,j+1))*V_I(i,j+1)+(C(i,j+1)-perdita(C(i,j+1)))*P(j+1)); % as original
+    b(j)=V_pre(i,j+1)+G(j)+CC(i,j);
+end
+x=A\b;
+V_post(i,2:NP-1)=x(:)';
+end
+V_pre(:,:)=V_post(:,:);
+end
+
+P=PSV.Price
+D=PSV.Day
+ts = yearfrac(D(1), D)
+
+figure;
+plot(D, P);
+datetick();
+title('Gas Prices');
+xlabel('Date');
+ylabel('Price ')
+
+logPrices=log(P)
+
+dlP=diff(logPrices)
+
+dt=1/365 %daily observations
+
+ch=dlP/dt
+
+logPrices(end)=[]
+
+coefficients=polyfit(logPrices,ch,1)
+
+residuals= ch - polyval(coefficients, logPrices)
+
+% Plot dxdt and fitted values
+figure;
+subplot(2, 1, 1);
+plot(D(2:end), ch);
+datetick();
+title('diff');
+xlabel('Date');
+ylabel('dP/dt');
+hold on;
+plot(D(2:end), polyval(coefficients, logPrices), 'r');
+hold off;
+legend('log(Price)', 'fitted values');
+
+
+k = -coefficients(1)
+theta_tilde = coefficients(2)/k
+sigma = std(residuals) * sqrt(dt)
